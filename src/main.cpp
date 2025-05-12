@@ -1,50 +1,97 @@
 #include <Arduino.h>
-#include <Dynamixel2Arduino.h> // .h header file
+#include <Dynamixel2Arduino.h>
 #include <motorControl.h>
 
 #define DXL_DIR_PIN 4
 #define DXL_SERIAL Serial2
 const long DXL_BAUDRATE = 57600;
+const uint8_t motorID = 3;
 
-Dynamixel2Arduino dxl(DXL_SERIAL, DXL_DIR_PIN);  // Instantiate dxl
+const int16_t PWM_ASSIST = 40;          // Assist torque
+const int16_t POSITION_MIN = 990;
+const int16_t POSITION_MAX = 1535;
+const uint16_t MOTION_THRESHOLD = 10;    // Minimum Δposition to count as movement
+const uint16_t NO_MOTION_COUNT_MAX = 10;
 
-motorControl* motor;  // Declare motor pointer
+Dynamixel2Arduino dxl(DXL_SERIAL, DXL_DIR_PIN);
+motorControl* motor;
+
+int32_t lastPosition = 0;
+int noMotionCounter = 0;
 
 void setup() {
-
   Serial.begin(115200);
   while(!Serial); // Wait for Serial Monitor
   delay(2000);
-  // Initialize Serial2 explicitly
+
+  // Initialize Dynamixel communication
   DXL_SERIAL.begin(DXL_BAUDRATE);
   motor = new motorControl(dxl);
-  pinMode(4, OUTPUT);
+  pinMode(DXL_DIR_PIN, OUTPUT);
 
-u_int8_t motorID = 3;
+  dxl.setPortProtocolVersion(2.0);
 
   if(dxl.ping(motorID)) {
     Serial.println("Motor found!");
-} else {
+  } else {
     Serial.println("Motor not responding.");
-}
+    return;
+  }
 
+  // Set motor to PWM control mode
+  dxl.writeControlTableItem(ControlTableItem::OPERATING_MODE, motorID, 16);
+  delay(100);
 
+  // Enable torque
+  dxl.writeControlTableItem(ControlTableItem::TORQUE_ENABLE, motorID, 1);
+  delay(100);
 
-
+  lastPosition = dxl.getPresentPosition(motorID);
+  Serial.print("Initial Position: ");
+  Serial.println(lastPosition);
 }
 
 void loop() {
-  // Continuously read position
-  u_int8_t motorID = 3;
-  if(dxl.ping(motorID)) {
-    int32_t position = dxl.getPresentPosition(motorID);
-    Serial.print("Current Position: ");
-    Serial.println(position);
-  } else {
-    Serial.println("Lost connection to motor!");
+  int32_t currentPosition = dxl.getPresentPosition(motorID);
+  int32_t delta = currentPosition - lastPosition;
+
+  // Handle soft limit enforcement
+  if (currentPosition < POSITION_MIN) {
+    // Below min → apply strong force forward
+    dxl.writeControlTableItem(ControlTableItem::TORQUE_ENABLE, motorID, 1);
+    dxl.writeControlTableItem(ControlTableItem::GOAL_PWM, motorID, +100); // Adjust strength as needed
+    Serial.println("Below range: resisting downward push.");
   }
-  delay(1000);
+  else if (currentPosition > POSITION_MAX) {
+    // Above max → apply strong force backward
+    dxl.writeControlTableItem(ControlTableItem::TORQUE_ENABLE, motorID, 1);
+    dxl.writeControlTableItem(ControlTableItem::GOAL_PWM, motorID, -100); // Adjust strength as needed
+    Serial.println("Above range: resisting upward push.");
+  }
+  else {
+    // Inside valid assist range
+    if (abs(delta) > MOTION_THRESHOLD) {
+      // Assist in direction of motion
+      int16_t pwmValue = (delta > 0) ? PWM_ASSIST : -PWM_ASSIST;
+      dxl.writeControlTableItem(ControlTableItem::TORQUE_ENABLE, motorID, 1);
+      dxl.writeControlTableItem(ControlTableItem::GOAL_PWM, motorID, pwmValue);
+      noMotionCounter = 0;
+    } else {
+      noMotionCounter++;
+      if (noMotionCounter >= 10) {
+        dxl.writeControlTableItem(ControlTableItem::GOAL_PWM, motorID, 0);
+        dxl.writeControlTableItem(ControlTableItem::TORQUE_ENABLE, motorID, 0);
+      }
+    }
+  }
+
+  lastPosition = currentPosition;
+  delay(10);
 }
+
+
+
+
 
 
 // #include <Arduino.h>
